@@ -7,6 +7,18 @@ Essentially, this is a 'from-scratch' implementation of a GPT-2 like model archi
 with a decoder-only transformer, that can be pre-trained on consumer level hardware at 
 'small' sizes. And everything is written in Rust.
 
+Check out what you can manage with a 618k parameter model:
+
+![picture of a terminal showing the training user interface](https://github.com/tbogdala/nanogpt-rusted/blob/main/assets/Screenshot_618k_parameters.png)
+
+## Features
+
+* Can tokenize text files to prepare for training
+* Fancy terminal UI for training loop that graphs the training and validation losses in real-time
+* Can generate text at any point in the training ('g' key)
+* Can save the model files for text inference via command line ('s' key)
+* Supports generating text from trained models via command line
+
 
 ## Caveats with this implementation
 
@@ -16,6 +28,7 @@ with a decoder-only transformer, that can be pre-trained on consumer level hardw
 * Flash attention isn't implemented.
 * The `metal` feature currently will not work because `candle_nn::ops::dropout` doesn't support
   accelleration with metal in Candle; cpu training on MacOS works however. T_T
+* Resuming training is not yet supported.
 
 
 # How to run
