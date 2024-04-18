@@ -7,7 +7,7 @@ Essentially, this is a 'from-scratch' implementation of a GPT-2 like model archi
 with a decoder-only transformer, that can be pre-trained on consumer level hardware at 
 'small' sizes. And everything is written in Rust.
 
-Check out what you can manage with a 618k parameter model:
+Check out what you can manage with a 618k parameter model tokenized by characters:
 
 ![picture of a terminal showing the training user interface](https://github.com/tbogdala/nanogpt-rusted/blob/main/assets/Screenshot_618k_parameters.png)
 
@@ -57,10 +57,21 @@ A copy of this file has been included in the repository for reference.
 
 In the root project folder, you can run the project with the command line options necessary
 to take the incoming text data, encode it and then write out the binary files. To prepare
-a dataset for character-level tokenization, use the following command.
+a dataset for character-level tokenization, use the following command:
 
 ```bash
-cargo run -- --prepare-dataset data/shakes.txt
+cargo run -- --prepare-dataset "data/shakes.txt"
+```
+
+The character-level tokenization is faster for the model training process, which is helpful
+when playing around with paramters and implementation features, but ultimately will yield
+text that's non-sensical.
+
+To tokenize the incoming data with the GPT2 tokenizer and run the training process with a vocabulary
+of approximately ~50k tokens instead of 65, prepare the dataset with the following command:
+
+```bash
+cargo run -- --prepare-dataset-gpt2 "data/shakes.txt"
 ```
 
 
@@ -159,6 +170,48 @@ Why, rear I would disconded of thee.
 ESCALUS:
 ```
 
+With the same parameters, but using a GPT2 tokenizer which yields a 13.5M parameter model, generating 300 new tokens
+yields the following non-cherry-picked result:
+
+```
+I Senator:
+He shall be made you, sir,
+Which you have your voices, you have given us all
+my son: I have been no more
+Than to the vantage of our general:
+Withdraw yourselves, sir, he's sentenced; and they say,
+say, but the poor gentleman, he hath carried all all
+biting, and a gentleman born to't.
+
+AUTOLYCUS:
+So that is that:
+He has a friar, sir, he made a man of his
+man's great, and he can warrant for his
+virtues his own kinsman: but he shall be his countrymen
+out of the table freedom of a quarter.
+
+First Gentleman:
+I tell you, sir, sir, sir, sir, I warrant him,
+and my friend.
+
+First Gentleman:
+O, how is it like a deal, indeed stolen from the world,
+As he doth a waking, a loathed Mercury,
+That Angelo hath kept a judge of a man,
+That case to crush down the ground.
+
+Third Gentleman:
+But, wherefore, as he is the child?
+
+Third Gentleman:
+Heaven became of an hour a man, a wagoner-on
+Which heareth that way to be so.
+
+First Gentleman:
+Why, if my brother, such delight
+to steal themselves as made the deed.
+```
+
 ## Notes
 
 * VRAM seems to spike to around 18gb used when using the baby GPT settings from nanogpt:
@@ -169,11 +222,14 @@ ESCALUS:
   (block_size = 128, batch_size = 32, n_layer = 3, n_head = 8, n_embed = 256, lr = 1e-3, max_iters = 20000).
   The final loss was 1.448624 (last validation was 1.5603111 at step 19800). Each step took around ~80ms
   on my 4090.
+* Using the 618k parameter settings (block_size = 64, batch_size =32, n_layer = 3, n_head = 4, n_embed = 128, lr = 1e-3, max_iters = 15000)
+  but with the GPT2 tokenizer made a 13.5M parameter model and yielded a final loss around ~3.1 (last valdiation loss was 5.21). 
+  Each step took about 210ms.
 * The attention heads still do all their work in separate tensors and are implemented
   naively while making sure the core of the implementation is working and does not implement
   the trick where they can make up a 4d vector for efficiency.
 
-
+-steps 15000 --batch-size 32 --block-size 64 --embedding-size 128 --head-count 4 --layer-count 3 --validation-batch 32
 ## License
 
 MIT licensed to match [Karpathy's nanogpt](https://github.com/karpathy/nanoGPT).

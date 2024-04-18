@@ -226,10 +226,11 @@ fn run_generation(args: &Args) -> Result<()> {
         }
     }
     let mut model = NanoGptModel::load_from_safetensors(model_filepath.as_str())?;
+    info!("Parameter count: {}", model.parameter_count());
 
     // setup a vector with just the newline token to be used for text generation tensors
     let mut newline_token: Vec<u32> = Vec::new();
-    newline_token.push(vocab_meta.stoi[&'\n']);
+    newline_token.push(vocab_meta.encode_char('\n')?);
 
     let mut rng = if args.seed > 0 {
         rand::rngs::StdRng::seed_from_u64(args.seed)
@@ -248,10 +249,7 @@ fn run_generation(args: &Args) -> Result<()> {
         .unwrap()
         .to_vec1::<u32>()
         .unwrap();
-    let generated_text = new_text_tokens
-        .iter()
-        .filter_map(|t| vocab_meta.itos.get(&t))
-        .collect::<String>();
+    let generated_text = vocab_meta.decode_tokens(new_text_tokens)?;
 
     println!("Generated text:\n{}", generated_text);
     Ok(())
@@ -297,7 +295,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
 
     // setup a vector with just the newline token to be used for text generation tensors
     let mut newline_token: Vec<u32> = Vec::new();
-    newline_token.push(vocab_meta.stoi[&'\n']);
+    newline_token.push(vocab_meta.encode_char('\n')?);
 
     // pull all the training parameters out of the args for convenience
     let epochs = args.steps;
@@ -321,12 +319,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
         &device,
     )?;
     info!("Datasets are loaded up and the model has been created.");
-    let all_vars = model.varmap.all_vars();
-    let param_count = all_vars
-        .iter()
-        .map(|var| var.dims().iter().product::<usize>())
-        .sum::<usize>();
-    info!("Parameter count: {}", param_count);
+    info!("Parameter count: {}", model.parameter_count());
 
     // this will keep track of our training data over time
     let mut results: Vec<TrainingStepData> = Vec::new();
@@ -489,12 +482,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
                             .unwrap()
                             .to_vec1::<u32>()
                             .unwrap();
-                        generated_text = Some(
-                            new_text_tokens
-                                .iter()
-                                .filter_map(|t| vocab_meta.itos.get(&t))
-                                .collect::<String>(),
-                        );
+                        generated_text = Some(vocab_meta.decode_tokens(new_text_tokens)?);
                     } else if key.code == KeyCode::Char('s') {
                         // test saving the model out
                         let file_stem = format!("model_step_{}", trained_epochs);
@@ -536,7 +524,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
                 step: trained_epochs,
                 loss: training_loss,
                 duration_ms: step_time_ms,
-                valdiation_loss: validation_loss,
+                validation_loss,
             });
 
             trained_epochs += 1;
@@ -575,14 +563,53 @@ struct TrainingStepData {
     duration_ms: u128,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    valdiation_loss: Option<f32>,
+    validation_loss: Option<f32>,
 }
 
+// This represents the vocabulary metadata used when preparing the dataset.
+// When using the character-level tokenizer process, both `itos` and `stoi`
+// will be embedded as hashmaps. When using the GPT2 tokenizer, while such
+// a table could be constructed, it's just nicer to use the Tokenizer class
+// instead. Instead of using the field directly to encode and decode, it 
+// should now be preferred to use the utility functions that deail with
+// abstracting the two possibilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct VocabMeta {
     vocab_size: usize,
-    itos: HashMap<u32, char>,
-    stoi: HashMap<char, u32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    itos: Option<HashMap<u32, char>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stoi: Option<HashMap<char, u32>>,
+
+    #[serde(skip)]
+    tokenizer: Option<Tokenizer>,
+}
+impl VocabMeta {
+    fn encode_char(&self, c: char) -> Result<u32> {
+        if let Some(stoi) = &self.stoi {
+            Ok(stoi[&c])
+        } else if let Some(tokenizer) = &self.tokenizer {
+            let result = tokenizer.encode(c.to_string().as_str(), false).map_err(anyhow::Error::msg)?;
+            Ok(result.get_ids()[0]) // we're encoding characters, so just pull the first id
+        } else {
+            Err(anyhow!("Vocabulary Metadata doesn't have a stoi hashmap or a loaded tokenizer."))
+        }
+    }
+
+    fn decode_tokens(&self, tokens: Vec<u32>) -> Result<String> {
+        if let Some(itos) = &self.itos {
+            Ok(tokens
+                .iter()
+                .filter_map(|t| itos.get(&t))
+                .collect::<String>())
+        } else if let Some(tokenizer) = &self.tokenizer {
+            Ok(tokenizer.decode(&tokens, false).map_err(anyhow::Error::msg)?)
+        } else {
+            Err(anyhow!("Vocabulary Meatadata doesn't have a itos hashmap or a loaded tokenizer."))
+        }
+    }
 }
 
 fn prepare_datase_charlevel(args: &Args) -> Result<()> {
@@ -690,8 +717,9 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     vocab_filepath.set_extension("vocab.json");
     let vocab_data = VocabMeta {
         vocab_size,
-        stoi,
-        itos,
+        stoi: Some(stoi),
+        itos: Some(itos),
+        tokenizer: None,
     };
     let vocab_data_json = serde_json::to_string_pretty(&vocab_data)?;
     std::fs::write(&vocab_filepath, vocab_data_json)?;
@@ -707,12 +735,12 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     Ok(())
 }
 
-// This takes the filepath provided in the `prepare_dataset` argument, loads it as a text
+// This takes the filepath provided in the `prepare_dataset_gpt2` argument, loads it as a text
 // file, splits the text into training and validation sets, encodes the incomding text
 // with the `gpt2` tokenizer, and then writes the resulting bytes out to new files
 // with the extensions "train.bin" and "val.bin".
 fn prepare_datase_gpt2(args: &Args) -> Result<()> {
-    if args.prepare_dataset.as_ref().is_none() {
+    if args.prepare_dataset_gpt2.as_ref().is_none() {
         return Err(anyhow!(
             "To prepare the dataset, you must pass the source-text parameter."
         ));
@@ -721,7 +749,7 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     let start_time = std::time::Instant::now();
 
     // load up the text from the source file into one buffer to tokenize.
-    let source_path = PathBuf::from(args.prepare_dataset.as_ref().unwrap());
+    let source_path = PathBuf::from(args.prepare_dataset_gpt2.as_ref().unwrap());
     if !source_path.exists() {
         return Err(anyhow!(
             "The source-text file specified doesn't exist: {:?}",
@@ -737,11 +765,11 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
         "Source text file read. A total of {} bytes are available.",
         source_bytes.len()
     );
+    let mut source_string = String::from_utf8(source_bytes)?;
 
     // to avoid splitting on a bad UTF boundary, we're going to convert
     // to a string first, and then split that based on length.
     let training_split = 0.9;
-    let mut source_string = String::from_utf8(source_bytes)?;
     let validation_string =
         source_string.split_off((source_string.len() as f32 * training_split) as usize);
     let training_string = source_string; // rebind for readability
@@ -765,6 +793,8 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
         training_encodings.get_ids().len(),
         validation_encodings.get_ids().len()
     );
+
+    let vocab_size = tokenizer.get_vocab_size(true);
 
     // a little extra massaging is necessary to reliably encode u32 as a big endian byte stream
     let mut training_bytes = Vec::new();
@@ -794,6 +824,18 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     let mut validation_file = File::create(&validation_filepath)?;
     validation_file.write_all(&validation_bytes)?;
 
+    // write out the vocab metadata
+    let mut vocab_filepath = source_path.clone();
+    vocab_filepath.set_extension("vocab.json");
+    let vocab_data = VocabMeta {
+        vocab_size,
+        stoi: None,
+        itos: None,
+        tokenizer: Some(tokenizer),
+    };
+    let vocab_data_json = serde_json::to_string_pretty(&vocab_data)?;
+    std::fs::write(&vocab_filepath, vocab_data_json)?;
+    
     info!(
         "Dataset prepare successfully in {:.2} seconds.",
         start_time.elapsed().as_secs_f32()
@@ -806,7 +848,14 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
 fn load_vocab_meta(fp: &str) -> Result<VocabMeta> {
     let f = File::open(fp)?;
     let bf = BufReader::new(f);
-    let meta: VocabMeta = serde_json::from_reader(bf)?;
+    let mut meta: VocabMeta = serde_json::from_reader(bf)?;
+
+    // if we don't have one of the hashmaps for the vocabulary,
+    // then load the tokenizer
+    if meta.stoi.is_none() || meta.itos.is_none() {
+        meta.tokenizer = Some(Tokenizer::from_pretrained("gpt2", None).unwrap());
+    }
+
     Ok(meta)
 }
 

@@ -2,4 +2,7 @@
 .vscode
 data/*.bin
 data/*.json
+dataset*
 model_*
+out-*
+.DS_Store

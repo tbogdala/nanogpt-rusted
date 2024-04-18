@@ -580,4 +580,13 @@ impl NanoGptModel {
         let loss_value = self.losses.last().unwrap();
         Ok(*loss_value)
     }
+
+    // returns the total number of parameters used by the model
+    pub fn parameter_count(&self) -> usize{
+        let all_vars = self.varmap.all_vars();
+        all_vars
+            .iter()
+            .map(|var| var.dims().iter().product::<usize>())
+            .sum::<usize>()
+    }
 }
