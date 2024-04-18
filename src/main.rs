@@ -16,7 +16,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    fs::File,
+    fs::{read_dir, File},
     io::{stdout, BufReader, Read, Write},
     path::PathBuf,
     process::exit,
@@ -570,7 +570,7 @@ struct TrainingStepData {
 // When using the character-level tokenizer process, both `itos` and `stoi`
 // will be embedded as hashmaps. When using the GPT2 tokenizer, while such
 // a table could be constructed, it's just nicer to use the Tokenizer class
-// instead. Instead of using the field directly to encode and decode, it 
+// instead. Instead of using the field directly to encode and decode, it
 // should now be preferred to use the utility functions that deail with
 // abstracting the two possibilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -591,10 +591,14 @@ impl VocabMeta {
         if let Some(stoi) = &self.stoi {
             Ok(stoi[&c])
         } else if let Some(tokenizer) = &self.tokenizer {
-            let result = tokenizer.encode(c.to_string().as_str(), false).map_err(anyhow::Error::msg)?;
+            let result = tokenizer
+                .encode(c.to_string().as_str(), false)
+                .map_err(anyhow::Error::msg)?;
             Ok(result.get_ids()[0]) // we're encoding characters, so just pull the first id
         } else {
-            Err(anyhow!("Vocabulary Metadata doesn't have a stoi hashmap or a loaded tokenizer."))
+            Err(anyhow!(
+                "Vocabulary Metadata doesn't have a stoi hashmap or a loaded tokenizer."
+            ))
         }
     }
 
@@ -605,11 +609,121 @@ impl VocabMeta {
                 .filter_map(|t| itos.get(&t))
                 .collect::<String>())
         } else if let Some(tokenizer) = &self.tokenizer {
-            Ok(tokenizer.decode(&tokens, false).map_err(anyhow::Error::msg)?)
+            Ok(tokenizer
+                .decode(&tokens, false)
+                .map_err(anyhow::Error::msg)?)
         } else {
-            Err(anyhow!("Vocabulary Meatadata doesn't have a itos hashmap or a loaded tokenizer."))
+            Err(anyhow!(
+                "Vocabulary Meatadata doesn't have a itos hashmap or a loaded tokenizer."
+            ))
         }
     }
+}
+
+// returns a vector of tuples with each tuple being a percentage and a byte vector; one tuple for each file
+// in the source directory, or just one tuple if the source is a file.
+//
+// the percentage f32 is the suggested percentage of source bytes to use in the dataset. this is
+// 1.0 (100%) for single file datasets. if the source path is a directory, then this function will
+// check each subdirectory which should be name "NNN_identifier" (E.g. "50_shakespeare") where the NNN
+// portion indicates a percentage the source files inside that folder should occupy in the final dataset.
+fn get_source_bytes(source: &String) -> Result<Vec<(f32, Vec<u8>)>> {
+    let source_path = PathBuf::from(source);
+    if !source_path.exists() {
+        return Err(anyhow!(
+            "The source file specified doesn't exist: {:?}",
+            source
+        ));
+    }
+
+    let mut list_of_buffers = Vec::new();
+
+    if source_path.is_file() {
+        let mut source_bytes = Vec::new();
+        let mut source_file = File::open(&source_path)?;
+        source_file.read_to_end(&mut source_bytes)?;
+        list_of_buffers.push((1.0, source_bytes));
+    } else {
+        // first load all of the source bytes
+        let mut source_bytes = Vec::new();
+
+        for entry in read_dir(&source_path)? {
+            let entry = entry?;
+            let subdir_path = entry.path();
+            if subdir_path.is_dir() {
+                let mut name = subdir_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                if let Some(offset) = name.find("_") {
+                    name.truncate(offset);
+                    if let Ok(pct_number) = name.parse::<u32>() {
+                        let pct = pct_number as f32 / 100.0;
+                        info!(
+                            "Using percentage of {} for the sub-directory {:?}",
+                            pct, subdir_path
+                        );
+                        // at this point we got a sub directory with a percentage
+                        let mut dir_bytes: Vec<u8> = Vec::new();
+                        for file_entry in read_dir(&subdir_path)? {
+                            let file_entry = file_entry?;
+                            let file_path = file_entry.path();
+                            if file_path.is_file() {
+                                info!("Loading bytes for file: {:?}", file_path);
+                                let mut source_bytes = Vec::new();
+                                let mut source_file = File::open(&file_path)?;
+                                source_file.read_to_end(&mut source_bytes)?;
+                                dir_bytes.append(&mut source_bytes);
+                            }
+                        }
+                        source_bytes.push((pct, dir_bytes, subdir_path));
+                    }
+                }
+            }
+        }
+
+        // print out some totals for what we've found so far
+        let mut total_source_bytes = 0;
+        for (pct, sb, p) in &source_bytes {
+            let sb_size = sb.len();
+            total_source_bytes += sb_size;
+            info!(
+                "Processed {:?} and made the following data streams:",
+                source_path
+            );
+            info!("  ({:.3}) {:?}: total bytes: {}", pct, p, sb_size);
+        }
+        info!("Total bytes: {}", total_source_bytes);
+
+        // scale the percentages based off of byte representation in the totals.
+        let mut total_pct = 0.0;
+        for (pct, sb, _) in &mut source_bytes {
+            let sb_size = sb.len();
+            let multiplier = total_source_bytes as f64 / sb_size as f64;
+            let scaled = *pct * multiplier as f32;
+            *pct = scaled;
+            total_pct += scaled;
+        }
+        // normalize them
+        for (pct, _, _) in &mut source_bytes {
+            let scaled = *pct / total_pct;
+            *pct = scaled;
+        }
+
+        // with the total bytes we can now clamp down the data based on the requested percentages
+        info!("Creating a final datastream for the dataset:");
+        for (pct, sb, p) in &source_bytes {
+            let mut bytes_to_take = (pct * total_source_bytes as f32) as usize;
+            bytes_to_take = bytes_to_take.min(sb.len());
+            info!("  ({:.3}) {:?}: taking bytes: {}", pct, p, bytes_to_take);
+            let bs = sb[..bytes_to_take].to_vec();
+            list_of_buffers.push((*pct, bs));
+        }
+    }
+
+    Ok(list_of_buffers)
 }
 
 fn prepare_datase_charlevel(args: &Args) -> Result<()> {
@@ -622,27 +736,27 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     let start_time = std::time::Instant::now();
 
     // load up the text from the source file into one buffer to tokenize.
-    let source_path = PathBuf::from(args.prepare_dataset.as_ref().unwrap());
-    if !source_path.exists() {
-        return Err(anyhow!(
-            "The source-text file specified doesn't exist: {:?}",
-            source_path
-        ));
+    let source_bytes = get_source_bytes(args.prepare_dataset.as_ref().unwrap())?;
+
+    let training_split = 0.9;
+    let mut training_string = String::new();
+    let mut validation_string = String::new();
+    for (_pct, bs) in source_bytes {
+        // to avoid splitting on a bad UTF boundary, we're going to convert
+        // to a string first, and then split that based on length.
+        let mut train_chunk = String::from_utf8(bs)?;
+        let validation_chunk =
+            train_chunk.split_off((train_chunk.len() as f32 * training_split) as usize);
+        training_string.push_str(&train_chunk);
+        validation_string.push_str(&validation_chunk);
     }
-    let mut source_bytes = Vec::new();
-    {
-        let mut source_file = File::open(&source_path)?;
-        source_file.read_to_end(&mut source_bytes)?;
-    }
-    info!(
-        "Source text file read. A total of {} bytes are available.",
-        source_bytes.len()
-    );
-    let mut source_string = String::from_utf8(source_bytes)?;
 
     // get all the unique characters that occur in this text
     let mut chars: HashSet<char> = HashSet::new();
-    for c in source_string.chars() {
+    for c in training_string.chars() {
+        chars.insert(c);
+    }
+    for c in validation_string.chars() {
         chars.insert(c);
     }
     let vocab_size = chars.len();
@@ -657,12 +771,6 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
         itos.insert(i as u32, *c);
     }
 
-    // to avoid splitting on a bad UTF boundary, we're going to convert
-    // to a string first, and then split that based on length.
-    let training_split = 0.9;
-    let validation_string =
-        source_string.split_off((source_string.len() as f32 * training_split) as usize);
-    let training_string = source_string; // rebind for readability
     info!(
         "Training string length: {} ; Validation string length: {}",
         training_string.len(),
@@ -702,19 +810,23 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     );
 
     // finally write out the bytes to the respective files
+    let mut source_path = PathBuf::from(args.prepare_dataset.as_ref().unwrap());
+    if source_path.is_file() {
+        source_path.pop();
+    }
     let mut training_filepath = source_path.clone();
-    training_filepath.set_extension("train.bin");
+    training_filepath.push("train.bin");
     let mut training_file = File::create(&training_filepath)?;
     training_file.write_all(&training_bytes)?;
 
     let mut validation_filepath = source_path.clone();
-    validation_filepath.set_extension("val.bin");
+    validation_filepath.push("val.bin");
     let mut validation_file = File::create(&validation_filepath)?;
     validation_file.write_all(&validation_bytes)?;
 
     // write out the vocab metadata
     let mut vocab_filepath = source_path.clone();
-    vocab_filepath.set_extension("vocab.json");
+    vocab_filepath.push("vocab.json");
     let vocab_data = VocabMeta {
         vocab_size,
         stoi: Some(stoi),
@@ -749,30 +861,21 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     let start_time = std::time::Instant::now();
 
     // load up the text from the source file into one buffer to tokenize.
-    let source_path = PathBuf::from(args.prepare_dataset_gpt2.as_ref().unwrap());
-    if !source_path.exists() {
-        return Err(anyhow!(
-            "The source-text file specified doesn't exist: {:?}",
-            source_path
-        ));
-    }
-    let mut source_bytes = Vec::new();
-    {
-        let mut source_file = File::open(&source_path)?;
-        source_file.read_to_end(&mut source_bytes)?;
-    }
-    info!(
-        "Source text file read. A total of {} bytes are available.",
-        source_bytes.len()
-    );
-    let mut source_string = String::from_utf8(source_bytes)?;
+    let source_bytes = get_source_bytes(args.prepare_dataset_gpt2.as_ref().unwrap())?;
 
-    // to avoid splitting on a bad UTF boundary, we're going to convert
-    // to a string first, and then split that based on length.
     let training_split = 0.9;
-    let validation_string =
-        source_string.split_off((source_string.len() as f32 * training_split) as usize);
-    let training_string = source_string; // rebind for readability
+    let mut training_string = String::new();
+    let mut validation_string = String::new();
+    for (_pct, bs) in source_bytes {
+        // to avoid splitting on a bad UTF boundary, we're going to convert
+        // to a string first, and then split that based on length.
+        let mut train_chunk = String::from_utf8(bs)?;
+        let validation_chunk =
+            train_chunk.split_off((train_chunk.len() as f32 * training_split) as usize);
+        training_string.push_str(&train_chunk);
+        validation_string.push_str(&validation_chunk);
+    }
+
     info!(
         "Training string length: {} ; Validation string length: {}",
         training_string.len(),
@@ -814,19 +917,23 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     );
 
     // finally write out the bytes to the respective files
+    let mut source_path = PathBuf::from(args.prepare_dataset_gpt2.as_ref().unwrap());
+    if source_path.is_file() {
+        source_path.pop();
+    }
     let mut training_filepath = source_path.clone();
-    training_filepath.set_extension("train.bin");
+    training_filepath.push("train.bin");
     let mut training_file = File::create(&training_filepath)?;
     training_file.write_all(&training_bytes)?;
 
     let mut validation_filepath = source_path.clone();
-    validation_filepath.set_extension("val.bin");
+    validation_filepath.push("val.bin");
     let mut validation_file = File::create(&validation_filepath)?;
     validation_file.write_all(&validation_bytes)?;
 
     // write out the vocab metadata
     let mut vocab_filepath = source_path.clone();
-    vocab_filepath.set_extension("vocab.json");
+    vocab_filepath.push("vocab.json");
     let vocab_data = VocabMeta {
         vocab_size,
         stoi: None,
@@ -835,7 +942,7 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     };
     let vocab_data_json = serde_json::to_string_pretty(&vocab_data)?;
     std::fs::write(&vocab_filepath, vocab_data_json)?;
-    
+
     info!(
         "Dataset prepare successfully in {:.2} seconds.",
         start_time.elapsed().as_secs_f32()

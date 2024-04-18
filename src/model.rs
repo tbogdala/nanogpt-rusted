@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use candle_core::{DType, Device, IndexOp, Tensor, D};
 use candle_nn::{
@@ -7,6 +6,7 @@ use candle_nn::{
 };
 use rand::{distributions::Distribution, rngs::StdRng, Rng};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 const DROPOUT: f32 = 0.2;
 
@@ -582,7 +582,7 @@ impl NanoGptModel {
     }
 
     // returns the total number of parameters used by the model
-    pub fn parameter_count(&self) -> usize{
+    pub fn parameter_count(&self) -> usize {
         let all_vars = self.varmap.all_vars();
         all_vars
             .iter()

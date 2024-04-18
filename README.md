@@ -74,6 +74,27 @@ of approximately ~50k tokens instead of 65, prepare the dataset with the followi
 cargo run -- --prepare-dataset-gpt2 "data/shakes.txt"
 ```
 
+### Dataset mixology
+
+I also added a mode to the `--prepare-dataset` and `--prepare-dataset-gpt2` parameters where you can specify
+a directory and it will assemble a dataset based on the files contained in subdirectories. For example,
+consider the following file structure:
+
+```
+<DIR> dataset_shakelove
+  |----<DIR> 25_lovecraft
+  |      |------pg70652.txt
+  |      |------pg68283.txt
+  |
+  |----<DIR> 75_shakespeare
+         |------pg100.txt
+```
+
+If you pass `--prepare-dataset-gpt2 "dataset_shakelove"`, it will attempt to create a dataset that is
+25% Lovecraft and 75% Shakespeare based on the assembled streams of text from the files contained in
+the folders. In the above example, there's far more tokens available in the complete works of Shakespeare,
+so the total tokens in the dataset will be reduce to accomodate the ratio and the available Lovecraft text.
+
 
 ## Training the model
 
@@ -84,9 +105,9 @@ To do a basic training, at a minimum supply a command-line like this:
 ```bash
 cargo run --release -- \
 --train \ 
---training-dataset "data/shakes.train.bin" \
---validation-dataset "data/shakes.val.bin" \
---vocab-metadata "data/shakes.vocab.json" \
+--training-dataset "data/train.bin" \
+--validation-dataset "data/val.bin" \
+--vocab-metadata "data/vocab.json" \
 ```
 
 Additionally the following parameters will be useful:
@@ -106,7 +127,7 @@ A lot of the defaults are aimed at the lower settings Karpathy starts out with i
 but if you want to run a slightly larger training for a 618k parameter model, try this:
 
 ```bash
-cargo run --release --features cuda,cudnn -- --train --training-dataset "data/shakes.train.bin" --validation-dataset "data/shakes.val.bin" --vocab-metadata "data/shakes.vocab.json" --steps 15000 --batch-size 32 --block-size 64 --embedding-size 128 --head-count 4 --layer-count 3 --validation-batch 32
+cargo run --release --features cuda,cudnn -- --train --training-dataset "data/train.bin" --validation-dataset "data/val.bin" --vocab-metadata "data/vocab.json" --steps 15000 --batch-size 32 --block-size 64 --embedding-size 128 --head-count 4 --layer-count 3 --validation-batch 32
 ```
 
 ## Text generation
@@ -121,7 +142,7 @@ still needs to be passed in as well as the 'file_stem' for the model file. For t
 session resulting in a 15000 step model file, this command-line will generate more text.
 
 ```bash
-cargo run --release --features cuda,cudnn -- --vocab-metadata "data/shakes.vocab.json" --generate "model_step_15000" --seed 0 --tokens-to-generate 1000 --temperature 0.7
+cargo run --release --features cuda,cudnn -- --vocab-metadata "data/vocab.json" --generate "model_step_15000" --seed 0 --tokens-to-generate 1000 --temperature 0.7
 ```
 
 For my training results, this produces the following text using the character-level tokenization model:
