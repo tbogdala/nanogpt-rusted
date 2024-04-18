@@ -152,6 +152,13 @@ struct Args {
 
     #[arg(
         long,
+        value_name = "Prompt-Text",
+        help = "The starting prompt for the text generation."
+    )]
+    pub prompt: Option<String>,
+
+    #[arg(
+        long,
         default_value_t = 1.0,
         help = "Temperature for the sampler when generating text."
     )]
@@ -229,15 +236,20 @@ fn run_generation(args: &Args) -> Result<()> {
     info!("Parameter count: {}", model.parameter_count());
 
     // setup a vector with just the newline token to be used for text generation tensors
-    let mut newline_token: Vec<u32> = Vec::new();
-    newline_token.push(vocab_meta.encode_char('\n')?);
+    // unless a prompt is specified on the command line.
+    let prompt_tokens: Vec<u32> = if let Some(prompt) = &args.prompt {
+        vocab_meta.encode_string(prompt.as_str())?
+    } else {
+        vocab_meta.encode_string("\n")?
+    };
+    let prompt_length = prompt_tokens.len();
 
     let mut rng = if args.seed > 0 {
         rand::rngs::StdRng::seed_from_u64(args.seed)
     } else {
         rand::rngs::StdRng::from_entropy()
     };
-    let new_text_tensor = Tensor::from_vec(newline_token, (1, 1), &device)?;
+    let new_text_tensor = Tensor::from_vec(prompt_tokens, (1, prompt_length), &device)?;
     let new_text_tensor = model.generate(
         &mut rng,
         new_text_tensor,
@@ -595,6 +607,20 @@ impl VocabMeta {
                 .encode(c.to_string().as_str(), false)
                 .map_err(anyhow::Error::msg)?;
             Ok(result.get_ids()[0]) // we're encoding characters, so just pull the first id
+        } else {
+            Err(anyhow!(
+                "Vocabulary Metadata doesn't have a stoi hashmap or a loaded tokenizer."
+            ))
+        }
+    }
+
+    fn encode_string(&self, s: &str) -> Result<Vec<u32>> {
+        if let Some(stoi) = &self.stoi {
+            let result: Vec<u32> = s.chars().map(|c| stoi[&c]).collect();
+            Ok(result)
+        } else if let Some(tokenizer) = &self.tokenizer {
+            let result = tokenizer.encode(s, false).map_err(anyhow::Error::msg)?;
+            Ok(result.get_ids().to_vec()) // we're encoding characters, so just pull the first id
         } else {
             Err(anyhow!(
                 "Vocabulary Metadata doesn't have a stoi hashmap or a loaded tokenizer."
