@@ -6,3 +6,4 @@ dataset*
 model_*
 out-*
 .DS_Store
+.debug*

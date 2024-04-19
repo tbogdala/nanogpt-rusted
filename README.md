@@ -39,6 +39,18 @@ The overall steps needed are:
 2. Prepare the source text file
 3. Train the model
 
+Now, you may be thinking to yourself: *"Self, I should be able to 'pre-train' 32M parameter models from scratch
+by CPU because that sure doesn't seem big compared to 7B which run lightning fast."* And you'd be right,
+technically. You can do the pretraining on CPU. 
+
+For a model with a context size of 512, embedding size of 256, 8 layers, 4 attention heads and a batch size of 8
+for training and validation... On a CPU that takes about 14.5 seconds per step. On my 4090, it takes 450 ms. That's
+close to a day and a half for every gpu hour equivalent. And if you have nothing but time, it should work. The toy
+sizes you start off with while following the nanogpt Youtube video train fast enough. Start off experimenting at 
+low sizes to get the hang of everything first. Then when you step up to multi-million parameter models, make sure 
+to include `--features cuda,cudnn` and run this on NVidia cards or `--features metal` on mac hardware
+(and make sure dropout is set to 0.0 due to current upstream limitations). 😁
+
 
 ## Downloading the source data
 
@@ -95,6 +107,8 @@ If you pass `--prepare-dataset-gpt2 "dataset_shakelove"`, it will attempt to cre
 the folders. In the above example, there's far more tokens available in the complete works of Shakespeare,
 so the total tokens in the dataset will be reduce to accomodate the ratio and the available Lovecraft text.
 
+Keep in mind that if you're using Project Gutenberg text files, make sure to remove the header **AND**
+footer they add before preparing the dataset.
 
 ## Training the model
 
@@ -129,6 +143,16 @@ but if you want to run a slightly larger training for a 618k parameter model, tr
 ```bash
 cargo run --release --features cuda,cudnn -- --train --training-dataset "data/train.bin" --validation-dataset "data/val.bin" --vocab-metadata "data/vocab.json" --steps 15000 --batch-size 32 --block-size 64 --embedding-size 128 --head-count 4 --layer-count 3 --validation-batch 32
 ```
+
+### Resuming training 
+
+If you save a training at any point, you can resume training from that set of three files: the `.config.json`, 
+`training_log.json` and `.safetensors`. You keep the rest of the command the same, like the one above (though it *should*
+pull the majority of the settings from the `.config.json` file), and then add `--resume-training "model_step_15000.safetensors"`
+to resume from that saved checkpoint. From there, you can adjust to new `--learning-rate` settings and increase the `--step`
+count to a new desired end point. The original training data should load and you should see the previous graph. When
+resuming, the software starts out paused, so just hit 'p' to unpause and start training back up.
+
 
 ## Text generation
 

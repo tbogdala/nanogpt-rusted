@@ -51,6 +51,13 @@ struct Args {
 
     #[arg(
         long,
+        value_name = "Model-File-Name",
+        help = "The file name of the model to resume the training for."
+    )]
+    pub resume_training: Option<String>,
+
+    #[arg(
+        long,
         value_name = "Training-Dataset-File",
         help = "The prepared binary training dataset to use for training."
     )]
@@ -238,6 +245,7 @@ fn run_generation(args: &Args) -> Result<()> {
     // setup a vector with just the newline token to be used for text generation tensors
     // unless a prompt is specified on the command line.
     let prompt_tokens: Vec<u32> = if let Some(prompt) = &args.prompt {
+        let prompt = prompt.replace("\\n", "\n");
         vocab_meta.encode_string(prompt.as_str())?
     } else {
         vocab_meta.encode_string("\n")?
@@ -320,23 +328,53 @@ fn run_training_ui(args: &Args) -> Result<()> {
     let validation_interval = args.validation_interval;
     let validation_batch = args.validation_batch;
 
-    // create the bigram model
-    let mut model = NanoGptModel::new(
-        num_of_heads,
-        num_of_hidden_layers,
-        vocab_meta.vocab_size,
-        block_size,
-        n_embed,
-        learning_rate,
-        &device,
-    )?;
-    info!("Datasets are loaded up and the model has been created.");
-    info!("Parameter count: {}", model.parameter_count());
-
     // this will keep track of our training data over time
     let mut results: Vec<TrainingStepData> = Vec::new();
     let mut ui_loss_data: Vec<(f64, f64)> = Vec::new();
     let mut ui_val_loss_data: Vec<(f64, f64)> = Vec::new();
+    let mut trained_epochs: usize = 0;
+
+    // create the bigram model
+    let mut model = if let Some(resume_model) = &args.resume_training {
+        // reload all the training data
+        let training_data_path = PathBuf::from(resume_model);
+        let training_data_path = training_data_path.with_extension("training_log.json");
+        info!("Attempting to load: {:?}", training_data_path);
+        let mut training_data = TrainingStepData::load_from_file(training_data_path)?;
+        training_data.sort_by(|a, b| a.step.partial_cmp(&b.step).unwrap());
+
+        // repopulate the UI data
+        results = training_data;
+        for r in &results {
+            ui_loss_data.push((r.step as f64, r.loss as f64));
+            if let Some(val_loss) = r.validation_loss {
+                ui_val_loss_data.push((r.step as f64, val_loss as f64));
+            }
+        }
+        trained_epochs = results.last().unwrap().step + 1;
+
+        // load the model
+        let mut model_filepath = resume_model.clone();
+        if model_filepath.ends_with(".safetensors") {
+            if let Some(dot_pos) = model_filepath.rfind('.') {
+                model_filepath.truncate(dot_pos);
+            }
+        }
+        info!("Attempting to load: {:?}", model_filepath);
+        NanoGptModel::load_from_safetensors(&model_filepath)?
+    } else {
+        NanoGptModel::new(
+            num_of_heads,
+            num_of_hidden_layers,
+            vocab_meta.vocab_size,
+            block_size,
+            n_embed,
+            learning_rate,
+            &device,
+        )?
+    };
+    info!("Datasets are loaded up and the model has been created.");
+    info!("Parameter count: {}", model.parameter_count());
 
     // setup UI
     stdout().execute(EnterAlternateScreen)?;
@@ -349,8 +387,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
     let tick_rate = Duration::from_millis((1_000.0 / fps) as u64);
 
     // training loop
-    let mut is_paused = false;
-    let mut trained_epochs: usize = 0;
+    let mut is_paused = args.resume_training.is_some(); // start paused for resuming training
     let mut generated_text: Option<String> = None;
     let mut msg_to_user: Option<String> = None;
     let mut last_tick = Instant::now();
@@ -576,6 +613,14 @@ struct TrainingStepData {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     validation_loss: Option<f32>,
+}
+impl TrainingStepData {
+    pub fn load_from_file(fp: PathBuf) -> Result<Vec<Self>> {
+        let f = File::open(fp)?;
+        let bf = BufReader::new(f);
+        let data: Vec<TrainingStepData> = serde_json::from_reader(bf)?;
+        Ok(data)
+    }
 }
 
 // This represents the vocabulary metadata used when preparing the dataset.
