@@ -3,7 +3,7 @@
 A Rust implementation of [Karpathy's nanogpt](https://github.com/karpathy/nanoGPT) using 
 [Candle](https://github.com/huggingface/candle). For inspiration, you can watch [his youtube video](https://www.youtube.com/watch?v=kCc8FmEb1nY) that goes over the implementation from scratch in Python.
 
-Essentially, this is a 'from-scratch' implementation of a GPT-2 like model architexture,
+Essentially, this is a 'from-scratch' implementation of a GPT-2 like model architecture,
 with a decoder-only transformer, that can be pre-trained on consumer level hardware at 
 'small' sizes. And everything is written in Rust.
 
@@ -17,6 +17,7 @@ Check out what you can manage with a 618k parameter model tokenized by character
 * Fancy terminal UI for training loop that graphs the training and validation losses in real-time
 * Can generate text at any point in the training ('g' key)
 * Can save the model files for text inference via command line ('s' key)
+* Can resume training for more steps after saving model files
 * Supports generating text from trained models via command line
 
 
@@ -26,9 +27,8 @@ Check out what you can manage with a 618k parameter model tokenized by character
   primarily a training exercise for the author. 
 * Focus was spent on making this run on one GPU only and training everything from scratch.
 * Flash attention isn't implemented.
-* The `metal` feature currently will not work because `candle_nn::ops::dropout` doesn't support
-  accelleration with metal in Candle; cpu training on MacOS works however. T_T
-* Resuming training is not yet supported.
+* The `metal` feature currently will not work while training with `--dropout` values > 0.0;
+ `candle_nn::ops::dropout` doesn't support acceleration with metal in Candle, but CPU training will still work. T_T
 
 
 # How to run
@@ -45,7 +45,7 @@ technically. You can do the pretraining on CPU.
 
 For a model with a context size of 512, embedding size of 256, 8 layers, 4 attention heads and a batch size of 8
 for training and validation... On a CPU that takes about 14.5 seconds per step. On my 4090, it takes 450 ms. That's
-close to a day and a half for every gpu hour equivalent. And if you have nothing but time, it should work. The toy
+close to a day and a half for every GPU hour equivalent. And if you have nothing but time, it should work. The toy
 sizes you start off with while following the nanogpt Youtube video train fast enough. Start off experimenting at 
 low sizes to get the hang of everything first. Then when you step up to multi-million parameter models, make sure 
 to include `--features cuda,cudnn` and run this on NVidia cards or `--features metal` on mac hardware
@@ -54,7 +54,7 @@ to include `--features cuda,cudnn` and run this on NVidia cards or `--features m
 
 ## Downloading the source data
 
-To replicate the original nanogpt repository, you can download the shakespeare text file like this:
+To replicate the original nanogpt repository, you can download the Shakespeare text file like this:
 
 ```bash
 mkdir data
@@ -76,7 +76,7 @@ cargo run -- --prepare-dataset "data/shakes.txt"
 ```
 
 The character-level tokenization is faster for the model training process, which is helpful
-when playing around with paramters and implementation features, but ultimately will yield
+when playing around with parameters and implementation features, but ultimately will yield
 text that's non-sensical.
 
 To tokenize the incoming data with the GPT2 tokenizer and run the training process with a vocabulary
@@ -105,7 +105,7 @@ consider the following file structure:
 If you pass `--prepare-dataset-gpt2 "dataset_shakelove"`, it will attempt to create a dataset that is
 25% Lovecraft and 75% Shakespeare based on the assembled streams of text from the files contained in
 the folders. In the above example, there's far more tokens available in the complete works of Shakespeare,
-so the total tokens in the dataset will be reduce to accomodate the ratio and the available Lovecraft text.
+so the total tokens in the dataset will be reduce to accommodate the ratio and the available Lovecraft text.
 
 Keep in mind that if you're using Project Gutenberg text files, make sure to remove the header **AND**
 footer they add before preparing the dataset.
@@ -268,7 +268,7 @@ to steal themselves as made the deed.
   The final loss was 1.448624 (last validation was 1.5603111 at step 19800). Each step took around ~80ms
   on my 4090.
 * Using the 618k parameter settings (block_size = 64, batch_size =32, n_layer = 3, n_head = 4, n_embed = 128, lr = 1e-3, max_iters = 15000)
-  but with the GPT2 tokenizer made a 13.5M parameter model and yielded a final loss around ~3.1 (last valdiation loss was 5.21). 
+  but with the GPT2 tokenizer made a 13.5M parameter model and yielded a final loss around ~3.1 (last validation loss was 5.21). 
   Each step took about 210ms.
 * The attention heads still do all their work in separate tensors and are implemented
   naively while making sure the core of the implementation is working and does not implement

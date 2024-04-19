@@ -124,6 +124,13 @@ struct Args {
 
     #[arg(
         long,
+        default_value_t = 0.0,
+        help = "The dropout factor for the model that randomly turns off a percentage of parameters in some layers while training."
+    )]
+    pub dropout: f32,
+
+    #[arg(
+        long,
         default_value_t = 0.001,
         help = "The learning rate to start the training at in the AdamW optimizer."
     )]
@@ -324,6 +331,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
     let n_embed = args.embedding_size;
     let num_of_hidden_layers = args.layer_count;
     let num_of_heads = args.head_count;
+    let dropout_rate = args.dropout;
     let learning_rate: f64 = args.learning_rate;
     let validation_interval = args.validation_interval;
     let validation_batch = args.validation_batch;
@@ -369,6 +377,7 @@ fn run_training_ui(args: &Args) -> Result<()> {
             vocab_meta.vocab_size,
             block_size,
             n_embed,
+            dropout_rate,
             learning_rate,
             &device,
         )?

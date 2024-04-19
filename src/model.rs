@@ -8,8 +8,6 @@ use rand::{distributions::Distribution, rngs::StdRng, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-const DROPOUT: f32 = 0.2;
-
 // Note: pulled from my other Candle project ... consider pulling in the sampler from Lantern.
 fn sample_multinomial(rng: &mut rand::rngs::StdRng, prs: &Vec<f32>) -> Result<u32> {
     let distr = rand::distributions::WeightedIndex::new(prs).map_err(anyhow::Error::msg)?;
@@ -70,190 +68,6 @@ impl DatasetBatcher {
     }
 }
 
-struct MultiHeadAttention {
-    heads: Vec<Head>,
-    proj: Linear,
-    dropout: Dropout,
-}
-impl MultiHeadAttention {
-    fn new(vb: VarBuilder, head_count: usize, head_size: usize, n_embed: usize) -> Result<Self> {
-        let mut heads = Vec::new();
-        for i in 0..head_count {
-            heads.push(Head::new(
-                vb.push_prefix(format!("Multihead_{}", i)),
-                head_size,
-                n_embed,
-            )?);
-        }
-        let proj = create_linear(
-            n_embed,
-            n_embed,
-            vb.push_prefix("residual_projection"),
-            0.0,
-            0.2,
-            true,
-        )?;
-        let dropout = Dropout::new(DROPOUT);
-
-        Ok(Self {
-            heads,
-            proj,
-            dropout,
-        })
-    }
-
-    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
-        let mut results = Vec::new();
-        for head in &mut self.heads {
-            results.push(head.forward(x, training)?);
-        }
-        let result = Tensor::cat(results.as_slice(), 2)?.contiguous()?;
-        let out = self.proj.forward(&result)?;
-        let dropped = self.dropout.forward(&out, training)?;
-        Ok(dropped)
-    }
-}
-
-struct Head {
-    key: Linear,
-    query: Linear,
-    value: Linear,
-    head_size: usize,
-    dropout: Dropout,
-}
-impl Head {
-    fn new(vb: VarBuilder, head_size: usize, n_embed: usize) -> Result<Self> {
-        let key = create_linear(
-            n_embed,
-            head_size,
-            vb.push_prefix("head_key"),
-            0.0,
-            0.2,
-            false,
-        )?;
-        let query = create_linear(
-            n_embed,
-            head_size,
-            vb.push_prefix("head_query"),
-            0.0,
-            0.2,
-            false,
-        )?;
-        let ln_value = create_linear(
-            n_embed,
-            head_size,
-            vb.push_prefix("head_value"),
-            0.0,
-            0.2,
-            false,
-        )?;
-        let dropout = Dropout::new(DROPOUT);
-
-        Ok(Self {
-            key,
-            query,
-            value: ln_value,
-            head_size,
-            dropout,
-        })
-    }
-
-    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
-        let (_b, time_x, _c) = x.shape().dims3()?;
-        let k = self.key.forward(x)?; // (B,T,C)
-        let q = self.query.forward(x)?; // (B,T,C)
-
-        let k_t = k.transpose(D::Minus2, D::Minus1)?; // (B,C,T)
-        let mut weights = q.matmul(&k_t)?; // (B,T,C) @ (B,C,T) -> (B,T,T)
-        weights = (weights * (1.0 / (self.head_size as f64).sqrt()))?;
-        let (batch, _, _) = weights.shape().dims3()?;
-        let tril = Tensor::tril2(time_x, DType::U8, &x.device())?.broadcast_left(batch)?;
-        let neginf = Tensor::try_from(f32::NEG_INFINITY)?
-            .to_device(&x.device())?
-            .broadcast_as(tril.shape())?;
-        let weights_masked = tril.where_cond(&weights, &neginf)?; // (B,T,T)
-        let weights_softmaxed = candle_nn::ops::softmax(&weights_masked, 2).unwrap(); // (B,T,T)
-        let dropped = self.dropout.forward(&weights_softmaxed, training)?;
-        let v = self.value.forward(x)?; // (B,T,C)
-        let out = dropped.matmul(&v)?; // (B,T,T) @ (B,T,C) -> (B,T,C)
-        Ok(out)
-    }
-}
-
-struct FeedForward {
-    net: Linear,
-    proj: Linear,
-    dropout: Dropout,
-}
-impl FeedForward {
-    fn new(vb: VarBuilder, n_embed: usize) -> Result<Self> {
-        let linear = create_linear(
-            n_embed,
-            4 * n_embed,
-            vb.push_prefix("ffwd_linear"),
-            0.0,
-            0.2,
-            true,
-        )?;
-        let proj = create_linear(
-            4 * n_embed,
-            n_embed,
-            vb.push_prefix("ffwd_projection"),
-            0.0,
-            0.2,
-            true,
-        )?;
-        let dropout = Dropout::new(DROPOUT);
-
-        Ok(Self {
-            net: linear,
-            proj,
-            dropout,
-        })
-    }
-
-    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
-        let result = self.net.forward(x)?;
-        let rectified = result.relu()?;
-        let proj = self.proj.forward(&rectified)?;
-        let dropped = self.dropout.forward(&proj, training)?;
-        Ok(dropped)
-    }
-}
-
-struct Block {
-    sa: MultiHeadAttention,
-    ffwd: FeedForward,
-    ln1: LayerNorm,
-    ln2: LayerNorm,
-}
-impl Block {
-    // remember to keep e_embed divisible by num_of_heads.
-    fn new(num_of_heads: usize, n_embed: usize, vb: VarBuilder) -> Result<Self> {
-        let head_size = n_embed / num_of_heads;
-        assert_eq!(n_embed % num_of_heads, 0);
-
-        let sa = MultiHeadAttention::new(
-            vb.push_prefix("Multiattn Heads"),
-            num_of_heads,
-            head_size,
-            n_embed,
-        )?;
-        let ffwd = FeedForward::new(vb.push_prefix("ffwd"), n_embed)?;
-
-        let ln_config = LayerNormConfig::default();
-        let ln1 = candle_nn::layer_norm(n_embed, ln_config, vb.push_prefix("ln1"))?;
-        let ln2 = candle_nn::layer_norm(n_embed, ln_config, vb.push_prefix("ln2"))?;
-
-        Ok(Self { sa, ffwd, ln1, ln2 })
-    }
-
-    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
-        let sa_out = (self.sa.forward(&self.ln1.forward(x)?, training)? + x)?;
-        let x = (self.ffwd.forward(&self.ln2.forward(&sa_out)?, training)? + sa_out)?;
-        Ok(x)
-    }
-}
 
 // a custom Embedding creation function to allow for custom `mean` and `stdev` values,
 // since the default ones don't match Karpathy's nanogpt implementation.
@@ -294,6 +108,218 @@ pub fn create_linear(
     Ok(Linear::new(ws, bs))
 }
 
+
+struct MultiHeadAttention {
+    heads: Vec<Head>,
+    proj: Linear,
+    dropout: Option<Dropout>,
+}
+impl MultiHeadAttention {
+    fn new(vb: VarBuilder, head_count: usize, head_size: usize, n_embed: usize, dropout_rate: f32) -> Result<Self> {
+        let mut heads = Vec::new();
+        for i in 0..head_count {
+            heads.push(Head::new(
+                vb.push_prefix(format!("Multihead_{}", i)),
+                head_size,
+                n_embed,
+                dropout_rate,
+            )?);
+        }
+        let proj = create_linear(
+            n_embed,
+            n_embed,
+            vb.push_prefix("residual_projection"),
+            0.0,
+            0.2,
+            true,
+        )?;
+        let dropout = if dropout_rate > 0.0 {
+            Some(Dropout::new(dropout_rate))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            heads,
+            proj,
+            dropout,
+        })
+    }
+
+    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
+        let mut results = Vec::new();
+        for head in &mut self.heads {
+            results.push(head.forward(x, training)?);
+        }
+        let result = Tensor::cat(results.as_slice(), 2)?.contiguous()?;
+        let out = self.proj.forward(&result)?;
+        let dropped = if let Some(dropper) = &self.dropout {
+            dropper.forward(&out, training)?
+        } else {
+            out
+        };
+        Ok(dropped)
+    }
+}
+
+struct Head {
+    key: Linear,
+    query: Linear,
+    value: Linear,
+    head_size: usize,
+    dropout: Option<Dropout>,
+}
+impl Head {
+    fn new(vb: VarBuilder, head_size: usize, n_embed: usize, dropout_rate: f32) -> Result<Self> {
+        let key = create_linear(
+            n_embed,
+            head_size,
+            vb.push_prefix("head_key"),
+            0.0,
+            0.2,
+            false,
+        )?;
+        let query = create_linear(
+            n_embed,
+            head_size,
+            vb.push_prefix("head_query"),
+            0.0,
+            0.2,
+            false,
+        )?;
+        let ln_value = create_linear(
+            n_embed,
+            head_size,
+            vb.push_prefix("head_value"),
+            0.0,
+            0.2,
+            false,
+        )?;
+        let dropout = if dropout_rate > 0.0 {
+            Some(Dropout::new(dropout_rate))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            key,
+            query,
+            value: ln_value,
+            head_size,
+            dropout,
+        })
+    }
+
+    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
+        let (_b, time_x, _c) = x.shape().dims3()?;
+        let k = self.key.forward(x)?; // (B,T,C)
+        let q = self.query.forward(x)?; // (B,T,C)
+
+        let k_t = k.transpose(D::Minus2, D::Minus1)?; // (B,C,T)
+        let mut weights = q.matmul(&k_t)?; // (B,T,C) @ (B,C,T) -> (B,T,T)
+        weights = (weights * (1.0 / (self.head_size as f64).sqrt()))?;
+        let (batch, _, _) = weights.shape().dims3()?;
+        let tril = Tensor::tril2(time_x, DType::U8, &x.device())?.broadcast_left(batch)?;
+        let neginf = Tensor::try_from(f32::NEG_INFINITY)?
+            .to_device(&x.device())?
+            .broadcast_as(tril.shape())?;
+        let weights_masked = tril.where_cond(&weights, &neginf)?; // (B,T,T)
+        let weights_softmaxed = candle_nn::ops::softmax(&weights_masked, 2).unwrap(); // (B,T,T)
+        let dropped = if let Some(dropper) = &self.dropout {
+            dropper.forward(&weights_softmaxed, training)?
+        } else {
+            weights_softmaxed
+        };
+        let v = self.value.forward(x)?; // (B,T,C)
+        let out = dropped.matmul(&v)?; // (B,T,T) @ (B,T,C) -> (B,T,C)
+        Ok(out)
+    }
+}
+
+struct FeedForward {
+    net: Linear,
+    proj: Linear,
+    dropout: Option<Dropout>,
+}
+impl FeedForward {
+    fn new(vb: VarBuilder, n_embed: usize, dropout_rate: f32) -> Result<Self> {
+        let linear = create_linear(
+            n_embed,
+            4 * n_embed,
+            vb.push_prefix("ffwd_linear"),
+            0.0,
+            0.2,
+            true,
+        )?;
+        let proj = create_linear(
+            4 * n_embed,
+            n_embed,
+            vb.push_prefix("ffwd_projection"),
+            0.0,
+            0.2,
+            true,
+        )?;
+        let dropout = if dropout_rate > 0.0 {
+            Some(Dropout::new(dropout_rate))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            net: linear,
+            proj,
+            dropout,
+        })
+    }
+
+    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
+        let result = self.net.forward(x)?;
+        let rectified = result.relu()?;
+        let proj = self.proj.forward(&rectified)?;
+        let dropped = if let Some(dropper) = &self.dropout {
+            dropper.forward(&proj, training)?
+        } else {
+            proj
+        };
+        Ok(dropped)
+    }
+}
+
+struct Block {
+    sa: MultiHeadAttention,
+    ffwd: FeedForward,
+    ln1: LayerNorm,
+    ln2: LayerNorm,
+}
+impl Block {
+    // remember to keep e_embed divisible by num_of_heads.
+    fn new(num_of_heads: usize, n_embed: usize, dropout_rate: f32, vb: VarBuilder) -> Result<Self> {
+        let head_size = n_embed / num_of_heads;
+        assert_eq!(n_embed % num_of_heads, 0);
+
+        let sa = MultiHeadAttention::new(
+            vb.push_prefix("Multiattn Heads"),
+            num_of_heads,
+            head_size,
+            n_embed,
+            dropout_rate,
+        )?;
+        let ffwd = FeedForward::new(vb.push_prefix("ffwd"), n_embed, dropout_rate)?;
+
+        let ln_config = LayerNormConfig::default();
+        let ln1 = candle_nn::layer_norm(n_embed, ln_config, vb.push_prefix("ln1"))?;
+        let ln2 = candle_nn::layer_norm(n_embed, ln_config, vb.push_prefix("ln2"))?;
+
+        Ok(Self { sa, ffwd, ln1, ln2 })
+    }
+
+    fn forward(&mut self, x: &Tensor, training: bool) -> Result<Tensor> {
+        let sa_out = (self.sa.forward(&self.ln1.forward(x)?, training)? + x)?;
+        let x = (self.ffwd.forward(&self.ln2.forward(&sa_out)?, training)? + sa_out)?;
+        Ok(x)
+    }
+}
+
 // Specifies the required sizes for the components of the model.
 // (mocking the llama json file naming scheme here...)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,18 +339,21 @@ pub struct NanoGptModelConfig {
     // size of the embeddings for each token
     pub hidden_size: usize,
 
+    // the dropout rate for training
+    pub dropout: f32,
+
     // learning rate used to train the model
     pub learning_rate: f64,
 }
 
 pub struct NanoGptModel {
     pub varmap: VarMap,
-    token_embedding_table: candle_nn::Embedding,
-    position_embedding_table: candle_nn::Embedding,
+    token_embedding_table: Embedding,
+    position_embedding_table: Embedding,
     blocks: Vec<Block>,
     ln_f: LayerNorm,
-    lm_head: candle_nn::Linear,
-    dropout: candle_nn::Dropout,
+    lm_head: Linear,
+    dropout: Option<Dropout>,
     config: NanoGptModelConfig,
     losses: Vec<f32>,
     optimizer: AdamW,
@@ -336,6 +365,7 @@ impl NanoGptModel {
     //   * `vocab_size`: should be the number of tokens for the model's vocabulary
     //   * `block_size`: the maximum context window for the model
     //   * `n_embed`: the size of the internal embeddings for each token
+    //   * `dropout_rate`: the percentage (0.0-1.0) of parameters to dropout during training
     //   * `learning_rate`: the learning rate to use for training th emodel
     pub fn new(
         num_of_heads: usize,
@@ -343,6 +373,7 @@ impl NanoGptModel {
         vocab_size: usize,
         block_size: usize,
         n_embed: usize,
+        dropout_rate: f32,
         learning_rate: f64,
         device: &Device,
     ) -> Result<Self> {
@@ -369,11 +400,16 @@ impl NanoGptModel {
             blocks.push(Block::new(
                 num_of_heads,
                 n_embed,
+                dropout_rate,
                 vb.push_prefix(format!("block_{}", i)),
             )?);
         }
 
-        let dropout = Dropout::new(DROPOUT);
+        let dropout = if dropout_rate > 0.0 {
+            Some(Dropout::new(dropout_rate))
+        } else {
+            None
+        };
         let ln_config = LayerNormConfig::default();
         let ln_f = candle_nn::layer_norm(n_embed, ln_config, vb.push_prefix("ln_f"))?;
         let lm_head = create_linear(
@@ -397,6 +433,7 @@ impl NanoGptModel {
             vocab_size,
             block_size,
             hidden_size: n_embed,
+            dropout: dropout_rate,
             learning_rate,
         };
 
@@ -439,6 +476,7 @@ impl NanoGptModel {
             config.vocab_size,
             config.block_size,
             config.hidden_size,
+            config.dropout,
             config.learning_rate,
             &device,
         )?;
@@ -474,8 +512,9 @@ impl NanoGptModel {
             .forward(&positionals)
             .map_err(anyhow::Error::msg)?; // (T,n_embed)
         let mut x = tok_emb.broadcast_add(&pos_emb)?; // pos brodcasted, result is (B,T,C)
-        x = self.dropout.forward(&x, training)?;
-
+        if let Some(dropper) = &self.dropout {
+            x = dropper.forward(&x, training)?
+        }
         for block in &mut self.blocks {
             x = block.forward(&x, training)?;
         }
