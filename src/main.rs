@@ -806,6 +806,22 @@ fn get_source_bytes(source: &String) -> Result<Vec<(f32, Vec<u8>)>> {
     Ok(list_of_buffers)
 }
 
+// a dumb naive implementation of string split that doesn't have utf-8 boundary issues.
+fn split_off_at_offset(s: &String, offset: usize) -> (String, String) {
+    let mut first = String::new();
+    let mut second = String::new();
+
+    for (i, c) in s.chars().enumerate() {
+        if i < offset {
+            first.push(c);
+        } else {
+            second.push(c);
+        }
+    }
+    
+    (first, second)
+}
+
 fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     if args.prepare_dataset.as_ref().is_none() {
         return Err(anyhow!(
@@ -824,9 +840,8 @@ fn prepare_datase_charlevel(args: &Args) -> Result<()> {
     for (_pct, bs) in source_bytes {
         // to avoid splitting on a bad UTF boundary, we're going to convert
         // to a string first, and then split that based on length.
-        let mut train_chunk = String::from_utf8(bs)?;
-        let validation_chunk =
-            train_chunk.split_off((train_chunk.len() as f32 * training_split) as usize);
+        let train_chunk = String::from_utf8(bs)?;
+        let (train_chunk, validation_chunk) = split_off_at_offset(&train_chunk, (train_chunk.len() as f32 * training_split) as usize);
         training_string.push_str(&train_chunk);
         validation_string.push_str(&validation_chunk);
     }
@@ -949,9 +964,8 @@ fn prepare_datase_gpt2(args: &Args) -> Result<()> {
     for (_pct, bs) in source_bytes {
         // to avoid splitting on a bad UTF boundary, we're going to convert
         // to a string first, and then split that based on length.
-        let mut train_chunk = String::from_utf8(bs)?;
-        let validation_chunk =
-            train_chunk.split_off((train_chunk.len() as f32 * training_split) as usize);
+        let train_chunk = String::from_utf8(bs)?;
+        let (train_chunk, validation_chunk) = split_off_at_offset(&train_chunk, (train_chunk.len() as f32 * training_split) as usize);
         training_string.push_str(&train_chunk);
         validation_string.push_str(&validation_chunk);
     }
